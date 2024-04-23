@@ -1,24 +1,25 @@
-name: Deploy VM for New Client
+name: Deploy VM on Hetzner Cloud
+
 env: 
-    HCLOUD_TOKEN_PASS: ${{ secrets.HCLOUD_TOKEN }}
+  HCLOUD_TOKEN_PASS: ${{ secrets.HCLOUD_TOKEN }} # token can be created by going inside the project
 
 on:
   workflow_dispatch:
     inputs:
       client_name:
-        description: 'Name of the new client'
+        description: 'Name of the new server'
         required: true
       desired_server_location:
-        description: 'Desired location of server (e.g., nbg1, fsn1, hel1, ash, hil --Default is nbg1 )' 
+        description: 'Desired location of server (e.g., nbg1, fsn1, hel1, ash, hil --Defaults to nbg1)'
         required: true
         default: 'nbg1'
       server_type:
-        description: 'Type of shared cpu server (e.g., CX11, CPX11, CX21, CX31, CX51)'
+        description: 'Type of shared CPU server in lower case (e.g., cx11, cpx11, cx21, cx31, cx51)'
         required: true
       os_image:
-        description: 'Operating system image (e.g., ubuntu-20.04, fedora, debin, centos)'
+        description: 'Operating system image (e.g., ubuntu-20.04, fedora, debian, centos --Defaults to ubuntu-22.04)'
         required: true
-        default: 'ubuntu-latest'
+        default: 'ubuntu-22.04'
 
 jobs:
   deploy-vm:
@@ -29,9 +30,10 @@ jobs:
 
       - name: Install hcloud CLI
         run: |
-         sudo apt-get update -y
-         sudo apt-get install hcloud-cli -y
-         hcloud version
+          sudo apt-get update -y
+          curl -sL https://github.com/hetznercloud/cli/releases/latest/download/hcloud-linux-amd64.tar.gz | tar xz
+          sudo install -m 0755 hcloud /usr/local/bin/hcloud
+          hcloud version
 
       - name: Create Hetzner Cloud VM
         run: |
@@ -41,4 +43,7 @@ jobs:
                                 --location ${{ github.event.inputs.desired_server_location }} \
                                 --type ${{ github.event.inputs.server_type }} \
                                 --image ${{ github.event.inputs.os_image }} \
-                                --ssh-key ${{ secrets.TEST_SSH_KEY }} \
+                                --network <network_name> \
+                                --firewall <firewall_name> \
+                                --ssh-key <ssh_key1_name> \
+                                --ssh-key <ssh_key2_name>
