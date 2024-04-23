@@ -1,6 +1,6 @@
 name: Deploy VM for New Client
 env: 
-    HCLOUD_TOKEN_PASS: ${{ secrets.HCLOUD_TOKEN }} #--token ${{ secrets.HCLOUD_TOKEN }}
+    HCLOUD_TOKEN_PASS: ${{ secrets.HCLOUD_TOKEN }}
 
 on:
   workflow_dispatch:
@@ -9,17 +9,16 @@ on:
         description: 'Name of the new client'
         required: true
       desired_server_location:
-        description: 'Desired location of server (e.g., nbg1)' 
+        description: 'Desired location of server (e.g., nbg1, fsn1, hel1, ash, hil --Default is nbg1 )' 
         required: true
+        default: 'nbg1'
       server_type:
-        description: 'Type of server (e.g., cx11)'
+        description: 'Type of shared cpu server (e.g., CX11, CPX11, CX21, CX31, CX51)'
         required: true
       os_image:
-        description: 'Operating system image (e.g., ubuntu-20.04)'
+        description: 'Operating system image (e.g., ubuntu-20.04, fedora, debin, centos)'
         required: true
-      environment:
-        description: 'Environment name'
-        required: true
+        default: 'ubuntu-latest'
 
 jobs:
   deploy-vm:
@@ -33,15 +32,13 @@ jobs:
          sudo apt-get update -y
          sudo apt-get install hcloud-cli -y
          hcloud version
-         #curl -L https://github.com/hetznercloud/cli/releases/download/v1.43.0/hcloud-linux-amd64.tar.gz | tar xvz
-         #sudo mv hcloud /usr/local/bin/hcloud
 
       - name: Create Hetzner Cloud VM
         run: |
-          HCLOUD_TOKEN_PASS: ${{ secrets.HCLOUD_TOKEN }}
+          export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
+          echo "Server Creating"
           hcloud server create --name ${{ github.event.inputs.client_name }}-vm \
                                 --location ${{ github.event.inputs.desired_server_location }} \
                                 --type ${{ github.event.inputs.server_type }} \
                                 --image ${{ github.event.inputs.os_image }} \
                                 --ssh-key ${{ secrets.TEST_SSH_KEY }} \
-                                --label "environment=${{ github.event.inputs.environment }}"
