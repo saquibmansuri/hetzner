@@ -1,49 +1,148 @@
 name: Deploy VM on Hetzner Cloud
 
-env: 
-  HCLOUD_TOKEN_PASS: ${{ secrets.HCLOUD_TOKEN }} # token can be created by going inside the project
+env:
+  HCLOUD_TOKEN_PASS: ${{ secrets.HCLOUD_TOKEN }}
 
 on:
   workflow_dispatch:
     inputs:
       client_name:
-        description: 'Name of the new server'
+        description: "Name of the new client"
         required: true
       desired_server_location:
-        description: 'Desired location of server (e.g., nbg1, fsn1, hel1, ash, hil --Defaults to nbg1)'
+        description: "Desired location of server (e.g., nbg1, fsn1, etc --Defaults to nbg1)"
         required: true
-        default: 'nbg1'
+        default: "nbg1"
       server_type:
-        description: 'Type of shared CPU server in lower case (e.g., cx11, cpx11, cx21, cx31, cx51)'
+        description: "Type of shared CPU server in lower case (e.g., cx11, cpx11, cx21, cx31, cx51)"
         required: true
+        default: "cx11"
       os_image:
-        description: 'Operating system image (e.g., ubuntu-20.04, fedora, debian, centos --Defaults to ubuntu-22.04)'
+        description: "Operating system image (e.g., ubuntu-20.04, fedora, debian, centos --Defaults to ubuntu-22.04)"
         required: true
-        default: 'ubuntu-22.04'
+        default: "ubuntu-22.04"
+      network:
+        description: "Existing network name"
+        required: true
+        default: "test-network"
+      load_balancer_type:
+        description: "Load balancer type"
+        required: true
+        default: "lb11"
+      certificate_id:
+        description: "SSL certificate id - fetch it by hcloud certificate list -o columns=name,id,type,domain_names (defaults to 'test')"
+        required: true
+        default: "123456"
 
 jobs:
-  deploy-vm:
+  create-infra:
     runs-on: ubuntu-latest
+    outputs:
+      SERVER_IP: ${{ steps.fetch-ip.outputs.SERVER_IP }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install hcloud CLI
+      - name: Install hcloud cli
         run: |
           sudo apt-get update -y
           curl -sL https://github.com/hetznercloud/cli/releases/latest/download/hcloud-linux-amd64.tar.gz | tar xz
           sudo install -m 0755 hcloud /usr/local/bin/hcloud
           hcloud version
 
-      - name: Create Hetzner Cloud VM
+      - name: Create new firewall and define rules
         run: |
           export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
-          echo "Server Creating"
+          hcloud firewall create --name ${{ github.event.inputs.client_name }}-firewall
+
+          # Commands for adding rules
+          hcloud firewall add-rule ${{ github.event.inputs.client_name }}-firewall --direction in --source-ips 0.0.0.0/0 --source-ips ::/0 --protocol tcp --port 80 --description "Allow HTTP"
+          hcloud firewall add-rule ${{ github.event.inputs.client_name }}-firewall --direction in --source-ips 0.0.0.0/0 --source-ips ::/0 --protocol tcp --port 443 --description "Allow HTTPS"
+          hcloud firewall add-rule ${{ github.event.inputs.client_name }}-firewall --direction in --source-ips 0.0.0.0/0 --source-ips ::/0 --protocol tcp --port 22 --description "Allow SSH"
+          hcloud firewall add-rule ${{ github.event.inputs.client_name }}-firewall --direction in --source-ips 0.0.0.0/0 --source-ips ::/0 --protocol icmp --description "Allow ICMP"
+
+      - name: List all existing certificate details
+        run: |
+          export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
+          hcloud certificate list -o columns=name,id,type,domain_names
+
+      - name: Create VM on hetzner cloud
+        run: |
+          export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
+          echo "Creating Server on Hetzner Cloud"
           hcloud server create --name ${{ github.event.inputs.client_name }}-vm \
                                 --location ${{ github.event.inputs.desired_server_location }} \
                                 --type ${{ github.event.inputs.server_type }} \
                                 --image ${{ github.event.inputs.os_image }} \
-                                --network <network_name> \
-                                --firewall <firewall_name> \
-                                --ssh-key <ssh_key1_name> \
-                                --ssh-key <ssh_key2_name>
+                                --network ${{ github.event.inputs.network }} \
+                                --firewall ${{ github.event.inputs.client_name }}-firewall \
+                                --ssh-key testkey
+
+      - name: Create new load balancer and attach to existing network
+        run: |
+          export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
+          hcloud load-balancer create --name ${{ github.event.inputs.client_name }}-lb --type ${{ github.event.inputs.load_balancer_type }} --location ${{ github.event.inputs.desired_server_location }}
+          hcloud load-balancer attach-to-network --network ${{ github.event.inputs.network }} ${{ github.event.inputs.client_name }}-lb
+
+      - name: Setup load balancer rules, services and targets
+        run: |
+          export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
+          # Replace <cert-id> with the actual ID of the certificate
+          hcloud load-balancer add-service --protocol https \
+                                            --listen-port 443 \
+                                            --destination-port 80 \
+                                            --http-certificates "${{ github.event.inputs.certificate_id }}" \
+                                            ${{ github.event.inputs.client_name }}-lb
+          hcloud load-balancer add-target --server ${{ github.event.inputs.client_name }}-vm  --use-private-ip ${{ github.event.inputs.client_name }}-lb
+
+      - name: Fetch server IP
+        id: fetch-ip
+        run: |
+          export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
+          SERVER_IP=$(hcloud server describe ${{ github.event.inputs.client_name }}-vm | grep IP: | awk 'NR==1{print $2}')
+          echo "Server IP fetched: $SERVER_IP"
+          echo "SERVER_IP=$SERVER_IP" >> $GITHUB_OUTPUT
+
+  deploy-app:
+    needs: [create-infra]
+    runs-on: ubuntu-latest
+    env:
+      SERVER_IP: ${{ needs.create-infra.outputs.SERVER_IP }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup docker and docker compose and make directory
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ env.SERVER_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /root
+            curl -fsSL https://get.docker.com -o get-docker.sh
+            sudo sh get-docker.sh
+            sudo apt-get install docker-compose-plugin
+            mkdir -p /root/myapp
+
+      - name: Transfer code to server
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ env.SERVER_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "."
+          target: "/root/myapp"
+
+      - name: Docker compose up on server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ env.SERVER_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /root/myapp
+            touch .env
+            sudo docker compose up -d
