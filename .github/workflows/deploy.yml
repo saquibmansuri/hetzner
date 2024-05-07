@@ -1,4 +1,4 @@
-name: Deploy VM on Hetzner Cloud
+name: Create Infrastructure on Hetzner and Deploy Application
 
 env:
   HCLOUD_TOKEN_PASS: ${{ secrets.HCLOUD_TOKEN }}
@@ -9,16 +9,19 @@ on:
       client_name:
         description: "Name of the new client"
         required: true
-      desired_server_location:
-        description: "Desired location of server (e.g., nbg1, fsn1, etc --Defaults to nbg1)"
+      subdomain_name:
+        description: "Subdomain name for the new DNS record"
         required: true
-        default: "nbg1"
       server_type:
-        description: "Type of shared CPU server in lower case (e.g., cx11, cpx11, cx21, cx31, cx51)"
+        description: "Type of server (e.g. cx11, cpx11, cax11, ccx13)"
         required: true
         default: "cx11"
+      desired_server_location:
+        description: "Desired location of server (e.g. nbg1, fsn1, hel1, ash, hil)"
+        required: true
+        default: "nbg1"
       os_image:
-        description: "Operating system image (e.g., ubuntu-20.04, fedora, debian, centos --Defaults to ubuntu-22.04)"
+        description: "Operating system (e.g. ubuntu-20.04, debian, centos)"
         required: true
         default: "ubuntu-22.04"
       network:
@@ -26,11 +29,11 @@ on:
         required: true
         default: "test-network"
       load_balancer_type:
-        description: "Load balancer type"
+        description: "Load balancer type (e.g. lb11, lb21, lb31)"
         required: true
         default: "lb11"
       certificate_id:
-        description: "SSL certificate id - fetch it by hcloud certificate list -o columns=name,id,type,domain_names (defaults to 'test')"
+        description: "SSL certificate id (defaults to existing 'testcertificate')"
         required: true
         default: "123456"
 
@@ -54,6 +57,7 @@ jobs:
       - name: Create new firewall and define rules
         run: |
           export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
+          # Command for creating a firewall
           hcloud firewall create --name ${{ github.event.inputs.client_name }}-firewall
 
           # Commands for adding rules
@@ -65,9 +69,10 @@ jobs:
       - name: List all existing certificate details
         run: |
           export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
+          # Fetching details of existing certificated to know the certificate id
           hcloud certificate list -o columns=name,id,type,domain_names
 
-      - name: Create VM on hetzner cloud
+      - name: Create server on hetzner cloud
         run: |
           export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
           echo "Creating Server on Hetzner Cloud"
@@ -77,15 +82,15 @@ jobs:
                                 --image ${{ github.event.inputs.os_image }} \
                                 --network ${{ github.event.inputs.network }} \
                                 --firewall ${{ github.event.inputs.client_name }}-firewall \
-                                --ssh-key testkey
-
-      - name: Create new load balancer and attach to existing network
+                                --ssh-key mykey
+  
+      - name: Create load balancer and attach to network
         run: |
           export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
           hcloud load-balancer create --name ${{ github.event.inputs.client_name }}-lb --type ${{ github.event.inputs.load_balancer_type }} --location ${{ github.event.inputs.desired_server_location }}
           hcloud load-balancer attach-to-network --network ${{ github.event.inputs.network }} ${{ github.event.inputs.client_name }}-lb
 
-      - name: Setup load balancer rules, services and targets
+      - name: Setup load balancer service rules and targets
         run: |
           export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
           # Replace <cert-id> with the actual ID of the certificate
@@ -96,6 +101,14 @@ jobs:
                                             ${{ github.event.inputs.client_name }}-lb
           hcloud load-balancer add-target --server ${{ github.event.inputs.client_name }}-vm  --use-private-ip ${{ github.event.inputs.client_name }}-lb
 
+      - name: Update health check status codes in load balancer
+        run: |
+          export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
+          # Add status codes 200-299,300-399,400-499
+          hcloud load-balancer update-service --listen-port 443 \
+                                               --health-check-http-status-codes "2??,3??,4??" \
+                                               ${{ github.event.inputs.client_name }}-lb
+
       - name: Fetch server IP
         id: fetch-ip
         run: |
@@ -104,6 +117,19 @@ jobs:
           echo "Server IP fetched: $SERVER_IP"
           echo "SERVER_IP=$SERVER_IP" >> $GITHUB_OUTPUT
 
+      # - name: Create DNS record
+      #   run: |
+      #     curl -X "POST" "https://dns.hetzner.com/api/v1/records" \
+      #       -H 'Content-Type: application/json' \
+      #       -H 'Auth-API-Token: ${{ secrets.HETZNER_DNS_API_TOKEN }}' \
+      #       -d $'{
+      #         "value": "${{ steps.fetch-ip.outputs.SERVER_IP }}",
+      #         "ttl": 86400,
+      #         "type": "A",
+      #         "name": "${{ github.event.inputs.subdomain_name }}",
+      #         "zone_id": "${{ secrets.HETZNER_DNS_ZONE_ID }}"
+      #       }'
+
   deploy-app:
     needs: [create-infra]
     runs-on: ubuntu-latest
@@ -111,10 +137,10 @@ jobs:
       SERVER_IP: ${{ needs.create-infra.outputs.SERVER_IP }}
 
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup docker and docker compose and make directory
+      - name: Install docker and docker compose
         uses: appleboy/ssh-action@master
         with:
           host: ${{ env.SERVER_IP }}
@@ -125,7 +151,17 @@ jobs:
             curl -fsSL https://get.docker.com -o get-docker.sh
             sudo sh get-docker.sh
             sudo apt-get install docker-compose-plugin
-            mkdir -p /root/myapp
+
+      - name: Setup directories and env files
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ env.SERVER_IP }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            mkdir -p /root/myapp 
+            touch /root/myapp/.env
+            echo "${{ secrets.ENV_FILE_CONTENT }}" > /root/myapp/.env
 
       - name: Transfer code to server
         uses: appleboy/scp-action@master
@@ -144,5 +180,4 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /root/myapp
-            touch .env
-            sudo docker compose up -d
+            docker compose up -d
