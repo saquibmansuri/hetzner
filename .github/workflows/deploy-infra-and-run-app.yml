@@ -15,7 +15,7 @@ on:
       server_type:
         description: "Type of server (e.g. cx11, cpx11, cax11, ccx13)"
         required: true
-        default: "cx11"
+        default: "cx31"
       desired_server_location:
         description: "Desired location of server (e.g. nbg1, fsn1, hel1, ash, hil)"
         required: true
@@ -33,7 +33,7 @@ on:
         required: true
         default: "lb11"
       certificate_id:
-        description: "SSL certificate id (defaults to existing 'testcertificate')"
+        description: "Id of existing ssl certificate"
         required: true
         default: "123456"
 
@@ -42,6 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       SERVER_IP: ${{ steps.fetch-ip.outputs.SERVER_IP }}
+      LB_IP: ${{ steps.fetch-lb-ip.outputs.LB_IP }}
 
     steps:
       - name: Checkout code
@@ -69,7 +70,6 @@ jobs:
       - name: List all existing certificate details
         run: |
           export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
-          # Fetching details of existing certificated to know the certificate id
           hcloud certificate list -o columns=name,id,type,domain_names
 
       - name: Create server on hetzner cloud
@@ -82,8 +82,9 @@ jobs:
                                 --image ${{ github.event.inputs.os_image }} \
                                 --network ${{ github.event.inputs.network }} \
                                 --firewall ${{ github.event.inputs.client_name }}-firewall \
-                                --ssh-key mykey
-  
+                                --ssh-key testkey1 \
+                                --ssh-key testkey2
+
       - name: Create load balancer and attach to network
         run: |
           export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
@@ -93,11 +94,11 @@ jobs:
       - name: Setup load balancer service rules and targets
         run: |
           export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
-          # Replace <cert-id> with the actual ID of the certificate
+          # Replace <cert-id> with the actual ID of the certificate, defaults to existing '123456'
           hcloud load-balancer add-service --protocol https \
                                             --listen-port 443 \
                                             --destination-port 80 \
-                                            --http-certificates "${{ github.event.inputs.certificate_id }}" \
+                                            --http-certificates ${{ github.event.inputs.certificate_id }} \
                                             ${{ github.event.inputs.client_name }}-lb
           hcloud load-balancer add-target --server ${{ github.event.inputs.client_name }}-vm  --use-private-ip ${{ github.event.inputs.client_name }}-lb
 
@@ -117,18 +118,26 @@ jobs:
           echo "Server IP fetched: $SERVER_IP"
           echo "SERVER_IP=$SERVER_IP" >> $GITHUB_OUTPUT
 
-      # - name: Create DNS record
-      #   run: |
-      #     curl -X "POST" "https://dns.hetzner.com/api/v1/records" \
-      #       -H 'Content-Type: application/json' \
-      #       -H 'Auth-API-Token: ${{ secrets.HETZNER_DNS_API_TOKEN }}' \
-      #       -d $'{
-      #         "value": "${{ steps.fetch-ip.outputs.SERVER_IP }}",
-      #         "ttl": 86400,
-      #         "type": "A",
-      #         "name": "${{ github.event.inputs.subdomain_name }}",
-      #         "zone_id": "${{ secrets.HETZNER_DNS_ZONE_ID }}"
-      #       }'
+      - name: Fetch load balancer IP
+        id: fetch-lb-ip
+        run: |
+          export HCLOUD_TOKEN="$HCLOUD_TOKEN_PASS"
+          LB_IP=$(hcloud load-balancer describe ${{ github.event.inputs.client_name }}-lb | grep IP: | awk 'NR==1{print $2}')
+          echo "Load Balancer IP fetched: $LB_IP"
+          echo "LB_IP=$LB_IP" >> $GITHUB_OUTPUT
+
+      - name: Create DNS record
+        run: |
+          curl -X "POST" "https://dns.hetzner.com/api/v1/records" \
+            -H 'Content-Type: application/json' \
+            -H 'Auth-API-Token: ${{ secrets.HETZNER_DNS_API_TOKEN }}' \
+            -d $'{
+              "value": "${{ steps.fetch-lb-ip.outputs.LB_IP }}",
+              "ttl": 86400,
+              "type": "A",
+              "name": "${{ github.event.inputs.subdomain_name }}",
+              "zone_id": "${{ secrets.HETZNER_DNS_ZONE_ID }}"
+            }'
 
   deploy-app:
     needs: [create-infra]
@@ -159,9 +168,9 @@ jobs:
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            mkdir -p /root/myapp 
-            touch /root/myapp/.env
-            echo "${{ secrets.ENV_FILE_CONTENT }}" > /root/myapp/.env
+            mkdir -p /root/src
+            touch /root/src/.env
+            echo "${{ secrets.ENV_FILE_CONTENT }}" > /root/src/.env
 
       - name: Transfer code to server
         uses: appleboy/scp-action@master
@@ -170,7 +179,7 @@ jobs:
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "."
-          target: "/root/myapp"
+          target: "/root/src"
 
       - name: Docker compose up on server
         uses: appleboy/ssh-action@master
@@ -179,5 +188,5 @@ jobs:
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /root/myapp
+            cd /root/src
             docker compose up -d
